@@ -28,7 +28,7 @@ Run the OUM installer
 After installation is complete, users can configure OUM by running
 `oum configure`
 
-# Updating rules with OUM
+# Updating rules with OSSEC Updater Modified (OUM) 0.1
 Rulsets can be be updated with `oum update` after OUM has been installed and configured.
 
 # Screenshots
