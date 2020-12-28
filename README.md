@@ -25,10 +25,10 @@ Run the OUM installer
 `wget -q -O - https://updates.atomicorp.com/installers/oum | bash`
 
 # Configuring OSSEC Updater Modified (OUM) 0.1
-After installation is complete, users can configure OUM by running:
+After installation is complete, users can configure OUM by running
 `oum configure`
 
-# Updating rules with OUM 
+# Updating rules with OUM
 Rulsets can be be updated with `oum update` after OUM has been installed and configured.
 
 # Screenshots
