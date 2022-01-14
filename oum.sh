@@ -1,15 +1,16 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Copyright Atomicorp 2021
-# https://www.atomicorp.com
-#
 # AGPL 3.0
-# This program is free software; you can redistribute it and/or modify
-# it under the terms of the Affero GNU General Public License (AGPL)
-#
+# Authors:
+#   - Charity Ponton
+#  - Cody Woods
+#  - Frank Iacovino
+#  - Juliy V. Chirkov (@juliyvchirkov)
+#  - Scott Shinn (@atomicturtle)
 
 
 # Globals
-VERSION=0.4
+VERSION=0.5
 OSSEC_HOME=/var/ossec
 SERVER=updates.atomicorp.com
 OSSEC_CRS_RULES_VERSION=0
@@ -17,593 +18,555 @@ OSSEC_CRS_THREAT_VERSION=0
 OSSEC_CRS_RULES_VERSION_CURRENT=0
 OSSEC_CRS_THREAT_VERSION_CURRENT=0
 
-# Command line arguments
-command=$1
-
-
 # Functions
-prereq_check() {
-	declare -a PREREQS=("curl" "tar" "gzip" "bc" )
-	IS_GOOD="1"
+print_error() {
+    local OPTIND
+    local OPTARG
+    local opt
+    local xtranl
+    local tab
+    local prefix
 
-	for PREREQ in "${PREREQS[@]}"; do
-	    which $PREREQ > /dev/null 2>&1
-
-	    if [ "$?" -ne "0" ]; then
-	      IS_GOOD="0"
-	      echo " ERROR: $PREREQ not found. $PREREQ must be installed."
-	    fi
-	done
-
-	if [ ! -d /var/ossec ]; then
-	    IS_GOOD="0"
-	    echo " ERROR: OSSEC package not found. OSSEC must be installed."
-	fi
-
-	if [ "$IS_GOOD" -ne "1" ]; then
-	    echo
-	    echo "Prerequisite check failed. Exiting!"
-	    echo
-	    exit 1
-	fi
-
-}
-
-function ossec_check() {
-        # Check for globbing
-        if ! grep -q decoders.d /var/ossec/etc/ossec.conf ; then
-                echo
-                echo
-		echo "########################################################################"
-                echo "  WARNING: /var/ossec/etc/ossec.conf is not configured for decoders.d"
-                echo "  replace the <rules></rules> section with:"
-                echo "  <rules>"
-                echo "          <decoder_dir pattern=\".xml$\">etc/decoders.d</decoder_dir>"
-                echo "          <rule_dir pattern=\".xml$\">etc/rules.d</rule_dir>"
-                echo "          <list>etc/lists/threat</list>"
-                echo "  </rules>"
-		echo "########################################################################"
-                echo
-                echo
-        fi
-
-}
-
-
-function rawurlencode() {
-    local string="${1}"
-    local strlen=${#string}
-    local encoded=""
-
-    for ((pos = 0; pos < strlen; pos++)); do
-        c=${string:$pos:1}
-        case "$c" in
-        [-_.~a-zA-Z0-9]) o="${c}" ;;
-        *) printf -v o '%%%02x' "'$c" ;;
+    while getopts ":ltTp" opt
+    do
+        case ${opt} in
+            l)
+                xtranl='\n'
+                ;;
+            t)
+                tab='\t'
+                ;;
+            T)
+                tab='\t\t'
+                ;;
+            p)
+                prefix='ERROR: '
+                ;;
         esac
-        encoded+="${o}"
     done
-    echo "${encoded}"
-    REPLY="${encoded}"
+
+    shift $((OPTIND - 1))
+
+    >&2 printf "${xtranl}${tab}${prefix}%s\n${xtranl}" "${@}"
 }
 
+which() {
+    local bindir
+
+    for bindir in $(IFS=: && echo ${PATH})
+    do
+        [ -x ${bindir}/${1} ] && return 0
+    done
+
+    return 1
+}
+
+encode_uri_component() {
+    [ $# -gt 0 ] && printf "${@}" | perl -pe 's/(.)/sprintf("%%%x", ord($1))/eg'
+}
+
+set_perm() {
+    chown $(stat -c %U:%G ${OSSEC_HOME}) "${1}"
+
+    if [ -d "${1}" ]
+    then
+        chmod 550 "${1}"
+    else
+        [[ ! $(stat -c %A "${1}") =~ x ]] && chmod 640 "${1}"
+    fi
+}
+
+prereq_check() {
+    local NOT_OK
+    local -a PREREQS=("curl" "tar" "gzip" "bc" "grep" "sed" "perl" "mktemp" "chown" "chmod" "stat" "find" "cp" "rm" "mv")
+    local PREREQ
+
+    for PREREQ in "${PREREQS[@]}"
+    do
+        ! which ${PREREQ} && NOT_OK=1 && print_error -tp "${PREREQ} not found. ${PREREQ} must be installed."
+    done
+
+    [ ! -d ${OSSEC_HOME} ] && NOT_OK=1 && print_error -tp "OSSEC package not found. OSSEC must be installed."
+
+    [ -n "${NOT_OK}" ] && print_error -l "Prerequisite check failed. Exiting!" && exit 1
+
+    # Check for globbing
+    if ! grep -q decoders.d ${OSSEC_HOME}/etc/ossec.conf
+    then
+        print_error
+        print_error -t "WARNING: ${OSSEC_HOME}/etc/ossec.conf is not configured for decoders.d"
+        print_error -t "replace the <rules></rules> section with:"
+        print_error
+        print_error -t "<rules>"
+        print_error -T '<decoder_dir pattern=".xml$">etc/decoders.d</decoder_dir>'
+        print_error -T '<rule_dir pattern=".xml$">etc/rules.d</rule_dir>'
+        print_error -T "<list>etc/lists/threat</list>"
+        print_error -t "</rules>"
+        print_error
+    fi
+}
 
 download() {
+    local RETVAL
+    local RESPONSE
+    local -a OPTS
 
-  URL=$1
-  FILENAME=$2
-  if [ $DEBUG ]; then
-    OPTS=""
-  else
-    OPTS="-s"
-  fi
+    [ -n "${DEBUG}" ] || OPTS+=("-s")
+    [ -n "${INSECURE}" ] && OPTS+=("--insecure")
 
-  if [ $INSECURE ]; then
-    OPTS="--insecure"
-  fi
+    RESPONSE=$(curl --write-out '%{http_code}' ${OPTS[@]} ${1} -o ${2})
+    RETVAL=$?
 
-  RESPONSE=$(curl --write-out '%{http_code}' ${OPTS} ${URL} -o ${FILENAME})
-
-  RETVAL=$?
-  if [ ${RETVAL} -ne 0 ]; then
-    echo "ERROR: Download failed with ERROR (${RETVAL})"
-    if [ ${RETVAL} -eq 60 ]; then
-	echo
-      	echo "  ERROR: Peer certificate cannot be authenticated with known CA certificates."
-	echo
+    if [ ${RETVAL} -ne 0 ]
+    then
+         [ ${RETVAL} -eq 60 ] && print_error -ltp "Peer certificate cannot be authenticated with known CA certificates."
+         print_error -lp "Download failed with ERROR (${RETVAL})"
+         exit 1
     fi
-    echo
-    exit 1
-  fi
 
-  if [[ "${RESPONSE}" == 401 ]] ; then
-	echo 
-	echo "  ERROR: request returned HTTP error code 401 [Username/Password Invalid]"
-	echo
-	exit 1
-  elif [[ "${RESPONSE}" != 200 ]] ; then
-	echo 
-	echo "  ERROR: request returned HTTP error code ${RESPONSE}"
-	echo
-	exit 1
+    [ ${RESPONSE} -eq 401 ] && print_error -ltp "request returned HTTP error code 401 [Username/Password Invalid]" && exit 1
+    [ ${RESPONSE} -ne 200 ] && print_error -ltp "request returned HTTP error code ${RESPONSE}" && exit 1
 
-  fi
+    set_perm ${2}
 }
 
 show_help() {
-  echo
-  echo "OSSEC Updater Modified (OUM) $VERSION"
-  echo
-  echo "Usage: oum [options] COMMAND "
-  echo
-  echo " List of Commands:"
-  echo
-  echo "  help			Display a helpful usage message"
-  echo "  list			List pending updates"
-  echo "  update		Update system"
-  echo "  configure		Configure system"
-  echo "  version		Display version"
-  echo
+    printf '\n%s\n\n' "OSSEC Updater Modified (OUM) $VERSION"
+    printf '%s\n\n' "Usage: oum [options] COMMAND"
+    printf '\t%s\n\n' "List of commands:"
+    printf '\t%s\t\t\t%s\n' "help" "Display this usage message"
+    printf '\t%s\t\t\t%s\n' "list" "List pending updates"
+    printf '\t%s\t\t\t%s\n' "update" "Update system"
+    printf '\t%s\t\t%s\n' "configure" "Configure system"
+    printf '\t%s\t%s\n' "install package-name" "Install package"
+    printf '\t%s\t\t\t%s\n\n' "version" "Display version"
+    printf '\t%s\n\n' "List of options:"
+    printf '\t%s\t\t\t%s\n' "-y" "Automatic yes to prompts"
+    printf '\t%s\t\t\t%s\n' "-d" "Debug mode"
+    printf '\t%s\t\t\t%s\n\n' "-i" "Do not verify SSL"
 }
 
-
 load_config() {
-  if [ ! -f ${OSSEC_HOME}/etc/oum.conf ]; then
-    echo
-    echo "ERROR: $OSSEC_HOME/etc/oum.conf not found"
-    echo
-    exit 1
-  fi
-  source ${OSSEC_HOME}/etc/oum.conf
+  [ ! -f ${OSSEC_HOME}/etc/oum.conf ] && print_error -p "${OSSEC_HOME}/etc/oum.conf not found." && exit 1
 
+  source ${OSSEC_HOME}/etc/oum.conf
 }
 
 check_version() {
-  if [ -f ${OSSEC_HOME}/tmp/VERSION ]; then
-    rm -f ${OSSEC_HOME}/tmp/VERSION
-  fi
-  download  https://${SERVER}/channels/rules/VERSION ${OSSEC_HOME}/tmp/VERSION
+    [ -f ${OSSEC_HOME}/tmp/VERSION ] && rm -f ${OSSEC_HOME}/tmp/VERSION
 
+    download https://${SERVER}/channels/rules/VERSION ${OSSEC_HOME}/tmp/VERSION
 
-        # Load old version
-        if [ -f ${OSSEC_HOME}/var/VERSION ]; then
-                source ${OSSEC_HOME}/var/VERSION
-                OSSEC_CRS_RULES_VERSION_CURRENT=${OSSEC_CRS_RULES_VERSION}
-                OSSEC_CRS_THREAT_VERSION_CURRENT=${OSSEC_CRS_THREAT_VERSION}
-        else
-                OSSEC_CRS_RULES_VERSION_CURRENT=0
-                OSSEC_CRS_THREAT_VERSION_CURRENT=0
-        fi
+    # Load old version
+    if [ -f ${OSSEC_HOME}/var/VERSION ]
+    then
+        source ${OSSEC_HOME}/var/VERSION
 
+        OSSEC_CRS_RULES_VERSION_CURRENT=${OSSEC_CRS_RULES_VERSION}
+        OSSEC_CRS_THREAT_VERSION_CURRENT=${OSSEC_CRS_THREAT_VERSION}
+    fi
 }
 
 update_version() {
-  release=$1
-  version=$2
-  if [ ! -f ${OSSEC_HOME}/var/VERSION ]; then
-    echo "OSSEC_CRS_RULES_VERSION=0" > ${OSSEC_HOME}/var/VERSION
-    echo "OSSEC_CRS_THREAT_VERSION=0" >> ${OSSEC_HOME}/var/VERSION
+    if [ ! -f ${OSSEC_HOME}/var/VERSION ]
+    then
+         echo "OSSEC_CRS_RULES_VERSION=0" >${OSSEC_HOME}/var/VERSION
+         echo "OSSEC_CRS_THREAT_VERSION=0" >>${OSSEC_HOME}/var/VERSION
 
-  fi
+         set_perm ${OSSEC_HOME}/var/VERSION
+    fi
 
-  sed -i "s/${release}.*/${release}=${version}/g" ${OSSEC_HOME}/var/VERSION
+    sed -i "s/${1}.*/${1}=${2}/g" ${OSSEC_HOME}/var/VERSION
 }
 
 show_updates() {
+    local -a ARRAY1
+    local idx
 
-  check_version
+    check_version
 
-  source ${OSSEC_HOME}/tmp/VERSION
+    source ${OSSEC_HOME}/tmp/VERSION
 
-  if (( $(echo "$OSSEC_CRS_RULES_VERSION_CURRENT < $OSSEC_CRS_RULES_VERSION" |bc -l) )); then
-    ARRAY1[0]="OSSEC-CRS-Rules ${OSSEC_CRS_RULES_VERSION}"
-  fi
+    [ $(echo "${OSSEC_CRS_RULES_VERSION} > ${OSSEC_CRS_RULES_VERSION_CURRENT}" | bc -l) -eq 1 ] &&
+        ARRAY1[0]="OSSEC-CRS-Rules ${OSSEC_CRS_RULES_VERSION}"
 
-  if [ ${OSSEC_CRS_THREAT_VERSION_CURRENT} -lt ${OSSEC_CRS_THREAT_VERSION} ]; then
-    ARRAY1[1]="Atomicorp-Threatfeed ${OSSEC_CRS_THREAT_VERSION}"
-  fi
+    [ ${OSSEC_CRS_THREAT_VERSION_CURRENT} -lt ${OSSEC_CRS_THREAT_VERSION} ] &&
+        ARRAY1[1]="Atomicorp-Threatfeed ${OSSEC_CRS_THREAT_VERSION}"
 
-  if [ ${#ARRAY1[@]} -ge 1 ]; then
-    echo "Available Upgrades"
-    for i in ${!ARRAY1[@]}; do
-      printf "%-32s" ${ARRAY1[i]}
-      printf "\n"
-    done
-  else
-	echo "No updates available"
-  fi
+    if [ ${#ARRAY1[@]} -gt 0 ]
+    then
+        printf '%s\n' "Updates available."
 
-
+        for idx in ${!ARRAY1[@]}
+        do
+            [ ${idx} -eq 0 ] && printf "\t%s\t\t\t%s\n" ${ARRAY1[$idx]} || printf "\t%s\t\t%s\n" ${ARRAY1[$idx]}
+        done
+    else
+        printf '%s\n' "No available updates."
+    fi
 }
 
 update_rules() {
+    local item
 
+    printf '\t%s\n' "Downloading Rule update: ${OSSEC_CRS_RULES_VERSION}"
 
-  echo "  Downloading Rule update: ${OSSEC_CRS_RULES_VERSION}"
-  download https://${USERNAME}:${PASSWORD}@${SERVER}/channels/rules/ossec/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz ${OSSEC_HOME}/tmp/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
+    download https://$(encode_uri_component ${USERNAME}):$(encode_uri_component ${PASSWORD})@${SERVER}/channels/rules/ossec/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz ${OSSEC_HOME}/tmp/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
 
-  pushd ${OSSEC_HOME}/tmp/ >/dev/null
-    if [ -d ossec-rules ]; then
-      rm -rf ossec-rules
-    fi
-    echo -n "  Extracting archive: "
-    tar xf ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
-    if [ $? -ne 0 ]; then
-      echo "Failed"
-      echo "  ERROR: archive could not be extracted"
-      exit 1
+    pushd ${OSSEC_HOME}/tmp >/dev/null
+
+    [ -d ossec-rules ] && rm -rf ossec-rules
+
+    printf '\t%s ' "Extracting archive:"
+
+    if tar xf ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
+    then
+        printf '%s\n' "OK"
     else
-      echo "OK"
+        printf '%s\n' "Failed"
+        print_error -tp "archive could not be extracted"
+        exit 1
     fi
+
+    rm -f ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
+
+    while IFS= read -r -d '' item
+    do
+        set_perm "${item}"
+    done < <(find ${OSSEC_HOME}/tmp/ossec-rules -print0)
 
     # Back up rules
-    echo -n "  Backup current rules: "
-    if [ -d ${OSSEC_HOME}/var/backup ]; then
-      rm -rf ${OSSEC_HOME}/var/backup
-    fi
-    mkdir -p ${OSSEC_HOME}/var/backup/decoders.d/
-    mkdir -p ${OSSEC_HOME}/var/backup/rules.d/
-    cp -a ${OSSEC_HOME}/etc/decoders.d/*xml ${OSSEC_HOME}/var/backup/decoders.d/ 2>/dev/null
-    cp -a ${OSSEC_HOME}/etc/rules.d/*xml ${OSSEC_HOME}/var/backup/rules.d/ 2>/dev/null
-    echo "OK"
+    printf '\t%s ' "Making backup of current rules:"
 
-    echo -n "  Applying base rule policy: "
-    if [ ! -d  ${OSSEC_HOME}/etc/decoders.d/ ]; then
-  mkdir -p ${OSSEC_HOME}/etc/decoders.d/
-    fi
-    rm -f ${OSSEC_HOME}/etc/decoders.d/*crs*xml
-    if [ ! -d  ${OSSEC_HOME}/etc/rules.d/ ]; then
-  mkdir -p ${OSSEC_HOME}/etc/rules.d/
-    fi
-    rm -f ${OSSEC_HOME}/etc/rules.d/*crs*xml
-    cp -a ossec-rules/decoders.d/*xml ${OSSEC_HOME}/etc/decoders.d/
-    cp -a ossec-rules/rules.d/*xml ${OSSEC_HOME}/etc/rules.d/
-    echo "OK"
+    [ -d ${OSSEC_HOME}/var/backup ] && rm -rf ${OSSEC_HOME}/var/backup
 
-
-    echo "  Excluding rulesets"
-    # Exclude rules
-    for ruleset in $EXCLUDE_RULES; do
-      if [ -f ${OSSEC_HOME}/etc/rules.d/${ruleset} ]; then
-        echo "    Disabling: $ruleset"
-        rm -f ${OSSEC_HOME}/etc/rules.d/${ruleset}
-      fi
+    for item in ${OSSEC_HOME}/var/backup ${OSSEC_HOME}/var/backup/decoders.d ${OSSEC_HOME}/var/backup/rules.d
+    do
+        mkdir ${item} && set_perm ${item}
     done
 
-    # Lint
-    echo -n "  Verifying rules: "
-    /var/ossec/bin/ossec-analysisd -t >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-      echo "Failed"
-      echo "  ERROR: Rule update failed lint"
-      rm -f ${OSSEC_HOME}/etc/decoders.d/*crs*xml
-      rm -f rm -f ${OSSEC_HOME}/etc/rules.d/*crs*xml
-      echo "  Reverting to last working copy"
-      cp -a ${OSSEC_HOME}/var/backup/decoders.d/ ${OSSEC_HOME}/etc/decoders.d/
-      cp -a ${OSSEC_HOME}/var/backup/rules.d/ ${OSSEC_HOME}/etc/rules.d/
-      echo
-      exit 1
-    else
-      echo "OK"
-      # Update OSSEC_CRS_RULES_VERSION
-      update_version OSSEC_CRS_RULES_VERSION ${OSSEC_CRS_RULES_VERSION}
+    [ -d ${OSSEC_HOME}/etc/decoders.d ] && cp -a ${OSSEC_HOME}/etc/decoders.d/* ${OSSEC_HOME}/var/backup/decoders.d/
+
+    [ -d ${OSSEC_HOME}/etc/rules.d ] && cp -a ${OSSEC_HOME}/etc/rules.d/* ${OSSEC_HOME}/var/backup/rules.d/
+
+    printf '%s\n' "OK"
+
+    printf '\t%s ' "Applying base rule policy:"
+
+    [ ! -d  ${OSSEC_HOME}/etc/decoders.d ] && mkdir ${OSSEC_HOME}/etc/decoders.d && set_perm ${OSSEC_HOME}/etc/decoders.d
+    rm -f ${OSSEC_HOME}/etc/decoders.d/*
+    cp -a ossec-rules/decoders.d/* ${OSSEC_HOME}/etc/decoders.d/
+
+    [ ! -d  ${OSSEC_HOME}/etc/rules.d ] && mkdir ${OSSEC_HOME}/etc/rules.d && set_perm ${OSSEC_HOME}/etc/rules.d
+    rm -f ${OSSEC_HOME}/etc/rules.d/*
+    cp -a ossec-rules/rules.d/* ${OSSEC_HOME}/etc/rules.d/
+
+    printf '%s\n' "OK"
+
+    if [ -n "${EXCLUDE_RULES}" ]
+    then
+        # Exclude rules
+        printf '\t%s\n' "Excluding rulesets."
+
+        for item in ${EXCLUDE_RULES}
+        do
+            [ -f ${OSSEC_HOME}/etc/rules.d/${item} ] && printf '\t%s\n' "Disabling: ${item}" && rm -f ${OSSEC_HOME}/etc/rules.d/${item}
+        done
     fi
 
-    UPDATE_OUT+="  OSSEC CRS Rules ${OSSEC_CRS_RULES_VERSION}\n"
-    # if this fails restore working rules from backup above
+    # Lint
+    printf '\t%s ' "Verifying rules:"
+
+    if ${OSSEC_HOME}/bin/ossec-analysisd -t >/dev/null 2>&1
+    then
+        printf '%s\n' "OK"
+
+        # update version
+        update_version OSSEC_CRS_RULES_VERSION ${OSSEC_CRS_RULES_VERSION}
+    else
+        printf '%s\n' "Failed"
+        print_error -tp "Rule update failed lint"
+
+        rm -f ${OSSEC_HOME}/etc/decoders.d/*
+        rm -f ${OSSEC_HOME}/etc/rules.d/*
+
+        printf '\t%s\n\n' "Reverting to last working copy"
+
+        cp -a ${OSSEC_HOME}/var/backup/decoders.d/* ${OSSEC_HOME}/etc/decoders.d/
+        cp -a ${OSSEC_HOME}/var/backup/rules.d/* ${OSSEC_HOME}/etc/decoders.d/
+
+        exit 1
+    fi
+
+    # add string to update
+    UPDATE_OUT+=("OSSEC CRS Rules ${OSSEC_CRS_RULES_VERSION}")
+
+    # cleanup
     rm -rf ossec-rules
 
-  popd >/dev/null
-
+    popd >/dev/null
 }
 
 update_threatfeed() {
-  echo "  Downloading Atomicorp Threatfeed update: ${OSSEC_CRS_THREAT_VERSION}"
-  download https://${USERNAME}:${PASSWORD}@${SERVER}/channels/rules/ossec/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz ${OSSEC_HOME}/tmp/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
-        pushd ${OSSEC_HOME}/tmp/ >/dev/null
-                if [ -d atomicorp-threatfeed ]; then
-                        rm -rf atomicorp-threatfeed
-                fi
-                echo -n "  Extracting archive: "
-                tar xf atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
-                if [ $? -ne 0 ]; then
-                        echo "Failed"
-                        echo "  ERROR: archive could not be extracted"
-                        exit 1
-                else
-      echo "OK"
+    local item
 
+    printf '\t%s\n' "Downloading Atomicorp Threatfeed update: ${OSSEC_CRS_THREAT_VERSION}"
+
+    download https://$(encode_uri_component ${USERNAME}):$(encode_uri_component ${PASSWORD})@${SERVER}/channels/rules/ossec/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz ${OSSEC_HOME}/tmp/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
+
+    pushd ${OSSEC_HOME}/tmp >/dev/null
+
+    [ -d atomicorp-threatfeed ] && rm -rf atomicorp-threatfeed
+
+    printf '\t%s ' "Extracting archive:"
+
+    if tar xf atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
+    then
+        printf '%s\n' "OK"
+    else
+        printf '%s\n' "Failed"
+        print_error -tp "archive could not be extracted"
+        exit 1
     fi
 
-    if [ ! -d ${OSSEC_HOME}/etc/lists/threat/ ]; then
-      mkdir -p ${OSSEC_HOME}/etc/lists/threat/
-    fi
-    rm -f ${OSSEC_HOME}/etc/lists/threat/* >/dev/null 2>&1
+    rm -f atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
+
+    while IFS= read -r -d '' item
+    do
+        set_perm "${item}"
+    done < <(find ${OSSEC_HOME}/tmp/atomicorp-threatfeed -print0)
+
+    [ ! -d ${OSSEC_HOME}/etc/lists ] && mkdir ${OSSEC_HOME}/etc/lists && set_perm ${OSSEC_HOME}/etc/lists
+    [ ! -d ${OSSEC_HOME}/etc/lists/threat ] && mkdir ${OSSEC_HOME}/etc/lists/threat && set_perm ${OSSEC_HOME}/etc/lists/threat
+
+    rm -f ${OSSEC_HOME}/etc/lists/threat/*
+
     cp -a atomicorp-threatfeed/* ${OSSEC_HOME}/etc/lists/threat/
-    chown root.ossec ${OSSEC_HOME}/etc/lists/threat
-    chown root.ossec ${OSSEC_HOME}/etc/lists/threat/*
 
     # update version
     update_version OSSEC_CRS_THREAT_VERSION ${OSSEC_CRS_THREAT_VERSION}
 
     # add string to update
-    UPDATE_OUT+="  Atomicorp Threatfeed ${OSSEC_CRS_THREAT_VERSION}\n"
+    UPDATE_OUT+=("Atomicorp Threatfeed ${OSSEC_CRS_THREAT_VERSION}")
 
     # cleanup
     rm -rf atomicorp-threatfeed
 
-
-  popd >/dev/null
+    popd >/dev/null
 }
 
 # Apply updates if they are available
 update() {
+    local -a UPDATE_OUT
+    local RESTART=""
+    local -a ARRAY1
+    local idx
 
-  if [[ "${USERNAME}" == "USERNAME" ]]; then
-	echo
-	echo "ERROR: oum credentials have not been configured. Run:"
-	echo "  oum configure"
-	echo
-	exit 1
-  fi
+    [[ -z "${USERNAME}" || "${USERNAME}" = "USERNAME" ]] && print_error -lp "oum credentials have not been configured. Run:\n\toum configure" && exit 1
 
-  check_version
-  source ${OSSEC_HOME}/tmp/VERSION
-  if [ $DEBUG ]; then
-    echo "DEBUG: Compare ${OSSEC_CRS_RULES_VERSION_CURRENT} to ${OSSEC_CRS_RULES_VERSION}"
-  fi
+    check_version
 
-  UPDATE_OUT=""
+    source ${OSSEC_HOME}/tmp/VERSION
 
-  if (( $(echo "$OSSEC_CRS_RULES_VERSION_CURRENT < $OSSEC_CRS_RULES_VERSION" |bc -l) )); then
-    ARRAY1[0]="OSSEC-CRS-Rules ${OSSEC_CRS_RULES_VERSION}"
-  fi
-  if [ ${OSSEC_CRS_THREAT_VERSION_CURRENT} -lt ${OSSEC_CRS_THREAT_VERSION} ]; then
-    ARRAY1[1]="Atomicorp-Threatfeed ${OSSEC_CRS_THREAT_VERSION}"
-  fi
+    [ ${DEBUG} ] && printf '%s\n' "DEBUG: Compare ${OSSEC_CRS_RULES_VERSION_CURRENT} to ${OSSEC_CRS_RULES_VERSION}"
 
-  if [[ ${#ARRAY1[@]} -ge 1 ]]; then
+    [ $(echo "${OSSEC_CRS_RULES_VERSION} > ${OSSEC_CRS_RULES_VERSION_CURRENT}" | bc -l) -eq 1 ] &&
+        ARRAY1[0]="OSSEC-CRS-Rules ${OSSEC_CRS_RULES_VERSION}"
 
-    echo "==============================================================================="
-    echo " Component			Version"
-    echo "==============================================================================="
-    echo "Upgrading: "
-    for i in ${!ARRAY1[@]}; do
-      printf "  %-28s" ${ARRAY1[i]}
-      printf "\n"
-    done
-    echo
-    echo
-    echo "==============================================================================="
-    echo
+    [ ${OSSEC_CRS_THREAT_VERSION_CURRENT} -lt ${OSSEC_CRS_THREAT_VERSION} ] &&
+        ARRAY1[1]="Atomicorp-Threatfeed ${OSSEC_CRS_THREAT_VERSION}"
 
+    if [ ${#ARRAY1[@]} -gt 0 ]
+    then
+        printf '=%.0s' {1..79}
+        printf '\n\t%s\t\t\t%s\n' "Component" "Version"
+        printf '=%.0s' {1..79}
+        printf '\n%s\n' "Upgrading:"
 
+        for idx in ${!ARRAY1[@]}
+        do
+            [ ${idx} -eq 0 ] && printf "\t%s\t\t\t%s\n" ${ARRAY1[$idx]} || printf "\t%s\t\t%s\n" ${ARRAY1[$idx]}
+        done
+        printf '=%.0s' {1..79}
+        printf '\n'
 
-    if [ ! $YES ]; then
-      read -p "Is this ok [y/N]: " -r
-      if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        echo "Operation aborted."
-            exit 1
-      fi
-    fi
+        if [ -z "${YES}" ]
+        then
+            read -rp "Is this ok [Y/N]: " -n1
 
-    for i in "${ARRAY1[@]}"; do
-      if [[ "$i" =~ "OSSEC-CRS-Rules".* ]]; then
-        update_rules
-      fi
-      if [[ "$i" =~ "Atomicorp-Threatfeed".* ]]; then
-        update_threatfeed
-      fi
+            [[ ! ${REPLY} =~ ^[Yy]$ ]] && print_error -l "Operation aborted." && exit 1
+        fi
 
-    done
+        for idx in ${!ARRAY1[@]}
+        do
+            [[ ${ARRAY1[$idx]} =~ "OSSEC-CRS-Rules" ]] && update_rules
+            [[ ${ARRAY1[$idx]} =~ "Atomicorp-Threatfeed" ]] && update_threatfeed
+        done
 
+        RESTART=1
 
+        printf '\n%s\n' "Upgraded:"
 
-    RESTART=1
-    echo
-    echo "Upgraded:"
-    echo -e "${UPDATE_OUT}"
-    echo "Complete!"
-  else
-	echo "No packages marked for update"
-  fi
+        for idx in ${!UPDATE_OUT[@]}
+        do
+            printf '\t%s\n' "${UPDATE_OUT[$idx]}"
+        done
 
-  # Restart ossec
-  if [[ ${RESTART}  ]]; then
-    echo -n "  Restarting OSSEC: "
-    if [ $DEBUG ]; then
-      echo
-      ${OSSEC_HOME}/bin/ossec-control restart
+        printf '%s\n\n' "Complete!"
     else
-      ${OSSEC_HOME}/bin/ossec-control restart >/dev/null 2>&1
-      if [ $? -ne 0 ]; then
-        echo "Failed"
-      else
-        echo "OK"
-      fi
+        printf '%s\n' "No packages marked for update."
     fi
-    echo
-  fi
+
+    # Restart ossec
+    if [ -n "${RESTART}" ]
+    then
+        printf '\t%s ' "Restarting OSSEC:"
+
+        if [ -n "$DEBUG" ]
+        then
+            printf '\n'
+            ${OSSEC_HOME}/bin/ossec-control restart
+        else
+            ${OSSEC_HOME}/bin/ossec-control restart >/dev/null 2>&1
+        fi
+
+        [ $? -eq 0 ] && printf '%s\n\n' "OK" || printf '%s\n\n' "Failed"
+    fi
 }
 
 configure() {
-  echo
-  echo "OSSEC Updater Modified (OUM) $VERSION"
+    local conf_cur
+    local conf_tmp
+    local user_tmp
+    local pass_tmp
 
-  # Prompt for Username
-  read -p "Please enter your subscription username: " user_tmp
-  until [ "$user_tmp" != "" ]; do
-    echo " ERROR: Username cannot be blank. "
-    echo
-    read -p "Please enter your subscription username:  " user_tmp
-  done
+    printf '\n%s\n' "OSSEC Updater Modified (OUM) ${VERSION}"
 
-  sed -i 's/^USERNAME.*\"/USERNAME=\"'${user_tmp}'\"/g' $OSSEC_HOME/etc/oum.conf
+    conf_cur=$(mktemp -u -p $OSSEC_HOME/etc oum.XXXXXXXX.conf)
+    conf_tmp=$(mktemp -u -p $OSSEC_HOME/etc oum.XXXXXXXX.conf)
 
-  PASSCONFIRMED=0
-  failed=0
-  while [ $PASSCONFIRMED -lt 1 ]; do
-    if [ $failed -gt 2 ]; then
-        echo "Exiting: too many failed attempts."
-        echo
-        echo "$(date -u) ERROR: too many failed attempts" >>$LOG
-        exit 1
-    fi
+    cp -a ${OSSEC_HOME}/etc/oum.conf ${conf_cur}
+    cp -a ${conf_cur} ${conf_tmp}
 
-    read -sp "Please enter your subscription password: " PASSWORD
-    echo
-    if [ "$PASSWORD" == "" ]; then
-        echo "Exiting: Password is blank..."
-        exit 1
-    fi
+    # Prompt for Username
+    read -rp "Please enter your subscription username [Default: ] " user_tmp
 
-    unset PASSWORD2
-    read -sp "Please re-enter your subscription password: " PASSWORD2
-    echo
+    until [ -n "${user_tmp}" ]
+    do
+        print_error -ltp "Username cannot be blank."
 
-    if [ "$PASSWORD" == "$PASSWORD2" ]; then
-        PASSCONFIRMED=1
-    else
-        failed=$(($failed + 1))
-        echo
-        echo "   Passwords do not match."
-        echo
-    fi
-  done
+        read -rp "Please enter your subscription username [Default: ] " user_tmp
+    done
 
-  sed -i 's/^PASSWORD.*/PASSWORD=\"'${PASSWORD}'\"/g' $OSSEC_HOME/etc/oum.conf
+    sed -i '/USERNAME=.*/d' ${conf_cur}
 
-  echo
+    echo "USERNAME=$(printf %q "${user_tmp}")" >${conf_tmp}
 
+    # Prompt for Password
+    read -rsp "Please enter your subscription password [Default: ] " pass_tmp
 
-  TC_TARGET=${SERVER}/channels/rules/ossec/README.md
-  ENCPASSWORD=$(rawurlencode $PASSWORD)
-  TEST_CREDENTIALS=$(curl -s https://${user_tmp}:$ENCPASSWORD@$TC_TARGET)
-  echo
-  echo -n "Verifying account: "
-  if [[ "$TEST_CREDENTIALS" != "Access to this repo requires registration" ]]; then
-	  echo "Failed"
-	  echo
-	  echo "  Username/Password credentials incorrect. Please confirm the"
-	  echo "  correct credentials were entered for the API key."
-	  echo
-	  exit 1
-  else
-	  echo "Passed"
-  fi
+    until [ -n "${pass_tmp}" ]
+    do
+        print_error -ltp "Password cannot be blank."
 
+        read -rsp "Please enter your subscription password [Default: ] " pass_tmp
+    done
 
+    sed -i '/PASSWORD=.*/d' ${conf_cur}
 
-exit
+    echo "PASSWORD=$(printf %q "${pass_tmp}")" >>${conf_tmp}
 
+    cat ${conf_cur} >>${conf_tmp}
 
+    rm -f ${conf_cur}
 
-  echo "Configuration Complete!"
-  echo
-  echo "To update the system, please run:"
-  echo "    oum update "
-  echo
+    mv -f ${conf_tmp} ${OSSEC_HOME}/etc/oum.conf
+
+    printf '\n%s\n\n%s\n\t%s\n\n' "Configuration Complete!" "To update the system, please run:" "oum update"
 }
-
 
 # Installs a package via OUM
 install_package() {
-  echo
-  echo "Installing Package: ${1}"
-  echo
+    local PKG="unknown"
 
-  yum install -y --enablerepo=atomic ${1}
+    [ -z "${1}" ] && print_error -p "package not specified. To install a package, please run:" && print_error -t "oum install package-name" && exit 1
 
-  if [ "$?" -ne 0 ]; then
-    echo
-    echo " ERROR: There was a problem installing ${1}!"
-    echo
-    exit 1
-  else
-    echo
-    echo " ${1} successfully installed"
-  fi
+    printf '\n%s\n\n' "Installing Package: ${1}"
 
+    which yum && PKG="rpm"
+    which apt-get && PKG="deb"
 
+    if [ "${PKG}" = "rpm" ]
+    then
+        yum install -y --enablerepo=atomic ${1}
+    elif [ "${PKG}" = "deb" ]
+    then
+        DEBIAN_FRONTEND=noninteractive apt-get -y install ${1}
+    else
+        print_error -lp "installation not supported."
+
+        exit 1
+    fi
+
+    if [ $? ]
+    then
+        printf '\n\t%s\n\n' "${1} successfully installed."
+    else
+        print_error -ltp "There was a problem installing ${1}!"
+
+        exit 1
+    fi
 }
 
+while getopts ":ydi" opt
+do
+    case ${opt} in
+        y)
+            YES=1
+            ;;
+        d)
+            DEBUG=1
+            ;;
+        i)
+            INSECURE=1
+            ;;
+        \?)
+            print_error -ltp "invalid option -${OPTARG}" && show_help && exit 1
+            ;;
+    esac
+done
 
+shift $((OPTIND - 1))
+
+[ -n "${DEBUG}" ] && set -x
 
 # Load our config file
 load_config
+
 prereq_check
 
-while getopts ":y" opt; do
-  case ${opt} in
-    y )
-      YES=1
-            ;;
-       \? )
-           echo "Invalid Option: -$OPTARG" 1>&2
-           exit 1
-           ;;
-    esac
-done
-shift $((OPTIND -1))
+# Command line arguments
+command=${1}
 
-case "$command" in
+shift
 
-  help)
-    show_help
-    shift $((OPTIND -1))
-    ;;
-  list)
-        shift
-        while getopts ":d:i" opt; do
-                case ${opt} in
-                        d)
-                                DEBUG=1
-                                ;;
-                        i)
-                                INSECURE=1
-                                ;;
-
-                esac
-        done
-
-    show_updates
-    shift $((OPTIND -1))
-    ;;
-  configure)
-    configure
-    shift $((OPTIND -1))
-    ;;
-  update|upgrade)
-    shift
-    while getopts ":d:insecure" opt; do
-      case ${opt} in
-        d)
-          DEBUG=1
-          ;;
-        i)
-          INSECURE=1
-          ;;
-
-      esac
-    done
-
-    update
-    ossec_check
-
-    ;;
-
-  install)
-    shift
-    install_package $1
-    shift $((OPTIND -1))
-    ;;
-
-  version)
-    echo "OUM Version: $VERSION"
-    shift $((OPTIND -1))
-    ;;
-  *)
-    show_help
-    ;;
-
+case "${command}" in
+    list)
+        show_updates
+        ;;
+    configure)
+        configure
+        ;;
+    update)
+        update
+        ;;
+    install)
+        install_package ${1}
+        ;;
+    version)
+        printf '\n%s\n\n' "OUM Version: $VERSION"
+        ;;
+    *)
+        show_help
+        ;;
 esac
