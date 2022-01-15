@@ -209,7 +209,7 @@ show_updates() {
 update_rules() {
     local item
 
-    printf '\t%s\n' "Downloading Rule update: ${OSSEC_CRS_RULES_VERSION}"
+    printf '\n\t%s\n' "Downloading Rule update: ${OSSEC_CRS_RULES_VERSION}"
 
     download https://$(encode_uri_component ${USERNAME}):$(encode_uri_component ${PASSWORD})@${SERVER}/channels/rules/ossec/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz ${OSSEC_HOME}/tmp/ossec-crs-rules-${OSSEC_CRS_RULES_VERSION}.tar.gz
 
@@ -310,7 +310,7 @@ update_rules() {
 update_threatfeed() {
     local item
 
-    printf '\t%s\n' "Downloading Atomicorp Threatfeed update: ${OSSEC_CRS_THREAT_VERSION}"
+    printf '\n\t%s\n' "Downloading Atomicorp Threatfeed update: ${OSSEC_CRS_THREAT_VERSION}"
 
     download https://$(encode_uri_component ${USERNAME}):$(encode_uri_component ${PASSWORD})@${SERVER}/channels/rules/ossec/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz ${OSSEC_HOME}/tmp/atomicorp-threatfeed-${OSSEC_CRS_THREAT_VERSION}.tar.gz
 
@@ -449,13 +449,16 @@ configure() {
     cp -a ${conf_cur} ${conf_tmp}
 
     # Prompt for Username
-    read -rp "Please enter your subscription username [Default: ] " user_tmp
+    read -rp "Please enter your subscription username [Default: ${USERNAME}]: " user_tmp
 
-    until [ -n "${user_tmp}" ]
-    do
+    if [[ ${USERNAME} ]] && [[ $user_tmp == "" ]]; then
+        user_tmp=${USERNAME}
+	fi
+
+    until [ -n "${user_tmp}" ]; do
         print_error -ltp "Username cannot be blank."
 
-        read -rp "Please enter your subscription username [Default: ] " user_tmp
+        read -rp "Please enter your subscription username [Default: ${USERNAME}]: " user_tmp
     done
 
     sed -i '/USERNAME=.*/d' ${conf_cur}
@@ -463,13 +466,16 @@ configure() {
     echo "USERNAME=$(printf %q "${user_tmp}")" >${conf_tmp}
 
     # Prompt for Password
-    read -rsp "Please enter your subscription password [Default: ] " pass_tmp
+    read -rsp "Please enter your subscription password [Default: ${PASSWORD}] " pass_tmp
 
-    until [ -n "${pass_tmp}" ]
-    do
+    if [[ ${PASSWORD} ]] && [[ $pass_tmp == "" ]]; then
+        pass_tmp=${PASSWORD}
+	fi
+
+    until [ -n "${pass_tmp}" ]; do 
         print_error -ltp "Password cannot be blank."
 
-        read -rsp "Please enter your subscription password [Default: ] " pass_tmp
+        read -rsp "Please enter your subscription password [Default: ${PASSWORD}] " pass_tmp
     done
 
     sed -i '/PASSWORD=.*/d' ${conf_cur}
@@ -564,7 +570,8 @@ case "${command}" in
         install_package ${1}
         ;;
     version)
-        printf '\n%s\n\n' "OUM Version: $VERSION"
+        printf '\n%s\n' "OSSEC Updater Modified (OUM) Version: $VERSION"
+        printf '%s\n\n' "  Copyright Atomicorp, Inc. 2021"
         ;;
     *)
         show_help
