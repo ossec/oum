@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# Copyright Atomicorp 2021
+# Copyright Atomicorp 2023
 # AGPL 3.0
 # Authors:
-#   - Charity Ponton
+#  - Charity Ponton
 #  - Cody Woods
 #  - Frank Iacovino
 #  - Juliy V. Chirkov (@juliyvchirkov)
@@ -10,7 +10,7 @@
 
 
 # Globals
-VERSION=0.5
+VERSION=1.0.0
 OSSEC_HOME=/var/ossec
 SERVER=updates.atomicorp.com
 OSSEC_CRS_RULES_VERSION=0
@@ -62,8 +62,22 @@ which() {
 }
 
 encode_uri_component() {
-    [ $# -gt 0 ] && printf "${@}" | perl -pe 's/(.)/sprintf("%%%x", ord($1))/eg'
+  local input="$@"
+  local length=${#input}
+  local encoded=""
+
+  for ((i = 0; i < length; i++)); do
+    local char="${input:i:1}"
+    if [[ $char =~ ^[a-zA-Z0-9\.\_\~\-]+$ ]]; then
+      encoded+="$char"
+    else
+      encoded+=$(printf "%%%02X" "'$char")
+    fi
+  done
+
+  echo "$encoded"
 }
+
 
 set_perm() {
     chown $(stat -c %U:%G ${OSSEC_HOME}) "${1}"
@@ -249,6 +263,7 @@ update_rules() {
 
     [ -d ${OSSEC_HOME}/etc/rules.d ] && cp -a ${OSSEC_HOME}/etc/rules.d/* ${OSSEC_HOME}/var/backup/rules.d/
 
+
     printf '%s\n' "OK"
 
     printf '\t%s ' "Applying base rule policy:"
@@ -260,6 +275,13 @@ update_rules() {
     [ ! -d  ${OSSEC_HOME}/etc/rules.d ] && mkdir ${OSSEC_HOME}/etc/rules.d && set_perm ${OSSEC_HOME}/etc/rules.d
     rm -f ${OSSEC_HOME}/etc/rules.d/*
     cp -a ossec-rules/rules.d/* ${OSSEC_HOME}/etc/rules.d/
+
+    if [ -d ossec-rules/shared ]
+    then
+        [ ! -d  ${OSSEC_HOME}/etc/shared ] && mkdir ${OSSEC_HOME}/etc/shared && set_perm ${OSSEC_HOME}/etc/shared
+        rm -f ${OSSEC_HOME}/etc/shared/*
+        cp -a ossec-rules/shared/* ${OSSEC_HOME}/etc/shared/
+    fi
 
     printf '%s\n' "OK"
 
@@ -392,9 +414,11 @@ update() {
 
         if [ -z "${YES}" ]
         then
-            read -rp "Is this ok [Y/N]: " -n1
+            read -rp "Is this ok [Y/n]: " -n1
 
+            [[ -z ${REPLY} ]] && REPLY="Y"  # Set default value to "Y" if user just hits Enter
             [[ ! ${REPLY} =~ ^[Yy]$ ]] && print_error -l "Operation aborted." && exit 1
+
         fi
 
         for idx in ${!ARRAY1[@]}
